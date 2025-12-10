@@ -1,0 +1,9 @@
+transformers
+datasets
+torch
+ctranslate2
+gradio
+sentencepiece
+protobuf
+accelerate
+sacremoses
