@@ -3,13 +3,21 @@ import os
 import json
 import torch
 import ctranslate2
-from transformers import MT5TokenizerFast, MT5ForConditionalGeneration
+from transformers import MBart50TokenizerFast, MBartForConditionalGeneration
 import pandas as pd
 from datasets import load_dataset
 
-MODEL_DIR = "models/mt5-transliteration"
-CT2_DIR = "models/mt5-ct2"
+MODEL_DIR = "models/mbart-transliteration"
+CT2_DIR = "models/mbart-ct2"
 TEST_FILE = "data/test.json"
+BASE_MODEL = "facebook/mbart-large-50-many-to-many-mmt"
+
+# Language Code Mapping
+LANG_MAP = {
+    "hin": "hi_IN",
+    "tam": "ta_IN",
+    "ben": "bn_IN"
+}
 
 def get_dir_size(path):
     total_size = 0
@@ -17,6 +25,7 @@ def get_dir_size(path):
         for f in filenames:
             fp = os.path.join(dirpath, f)
             total_size += os.path.getsize(fp)
+    # Return in GB if large, but MB is standard here
     return total_size / (1024 * 1024) # MB
 
 def benchmark():
@@ -30,55 +39,63 @@ def benchmark():
     
     # 1. HF Model
     print("Loading HF Model...")
-    model_to_load = MODEL_DIR if os.path.exists(MODEL_DIR) else "google/mt5-small"
+    model_to_load = MODEL_DIR if os.path.exists(MODEL_DIR) else BASE_MODEL
     print(f"Using {model_to_load}")
-    tokenizer = MT5TokenizerFast.from_pretrained(model_to_load)
-    hf_model = MT5ForConditionalGeneration.from_pretrained(model_to_load)
+    tokenizer = MBart50TokenizerFast.from_pretrained(model_to_load)
+    hf_model = MBartForConditionalGeneration.from_pretrained(model_to_load)
     if torch.cuda.is_available():
         hf_model = hf_model.cuda()
     
     start_time = time.time()
     for item in samples:
         src = item['src']
-        # lang mapping for prefix
-        lang_map = {"hin": "transliterate to hindi: ", "tam": "transliterate to tamil: ", "ben": "transliterate to bengali: "}
-        prefix = lang_map[item['lang']]
-        print(f"DEBUG: prefix={type(prefix)}, src={type(src)}, val={src}")
+        target_lang_code = LANG_MAP[item['lang']]
         
-        inputs = tokenizer(str(prefix) + str(src), return_tensors="pt")
+        # mBART Inference
+        tokenizer.src_lang = "en_XX"
+        encoded = tokenizer(src, return_tensors="pt")
         if torch.cuda.is_available():
-            inputs = inputs.to("cuda")
+            encoded = encoded.to("cuda")
             
-        generated_tokens = hf_model.generate(**inputs, max_length=128)
+        generated_tokens = hf_model.generate(
+            **encoded,
+            forced_bos_token_id=tokenizer.lang_code_to_id[target_lang_code],
+            max_length=128
+        )
         _ = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
+        
     hf_time = time.time() - start_time
     
     # 2. CTranslate2 Model
     print("Loading CT2 Model logic...")
     # CT2 Translator for Encoder-Decoder
-    # If using CT2, we need to load it if exists, else skip
     if os.path.exists(CT2_DIR):
         translator = ctranslate2.Translator(CT2_DIR)
         
         start_time = time.time()
         for item in samples:
             src = item['src']
-            lang_map = {"hin": "transliterate to hindi: ", "tam": "transliterate to tamil: ", "ben": "transliterate to bengali: "}
-            prefix = lang_map[item['lang']]
+            target_lang_code = LANG_MAP[item['lang']]
             
-            # Tokenize
-            source = tokenizer.convert_ids_to_tokens(tokenizer.encode(prefix + src))
+            # Tokenize source
+            tokenizer.src_lang = "en_XX"
+            source = tokenizer.convert_ids_to_tokens(tokenizer.encode(src))
             
             # Translate
-            results = translator.translate_batch([source])
-            # Decode handled implicitly in speed check but technically need decoding
+            # CT2 requires target prefix or forced decoding.
+            # API: translator.translate_batch(source, target_prefix=[[lang_token]])
+            target_prefix = [[target_lang_code]]
+            
+            results = translator.translate_batch([source], target_prefix=target_prefix)
+            # Decode not timed, but showing API usage
+            
         ct2_time = time.time() - start_time
     else:
         print("CT2 Model not found, skipping speed test.")
         ct2_time = -1
     
     # Sizes
-    hf_size = get_dir_size(MODEL_DIR) if os.path.exists(MODEL_DIR) else 0 # Approximate base model size is large
+    hf_size = get_dir_size(MODEL_DIR) if os.path.exists(MODEL_DIR) else 0 
     ct2_size = get_dir_size(CT2_DIR)
     
     print("\nResults:")

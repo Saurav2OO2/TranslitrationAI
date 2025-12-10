@@ -1,57 +1,73 @@
 import gradio as gr
 import ctranslate2
-from transformers import MT5TokenizerFast
+from transformers import MBart50TokenizerFast
 import os
 
-MODEL_PATH = "models/mt5-ct2"
+MODEL_PATH = "models/mbart-ct2"
+BASE_MODEL = "facebook/mbart-large-50-many-to-many-mmt"
+
 # Fallback to non-optimized if not exists
 if not os.path.exists(MODEL_PATH):
-    MODEL_PATH = "models/mt5-transliteration"
+    MODEL_PATH = "models/mbart-transliteration"
     IS_CT2 = False
-    from transformers import MT5ForConditionalGeneration
+    from transformers import MBartForConditionalGeneration
 else:
     IS_CT2 = True
 
-print(f"Loading model from {MODEL_PATH} (CT2={IS_CT2})...")
-tokenizer = MT5TokenizerFast.from_pretrained(MODEL_PATH)
+model_to_load = MODEL_PATH if os.path.exists(MODEL_PATH) else BASE_MODEL
+if model_to_load == BASE_MODEL: 
+    IS_CT2 = False
+    from transformers import MBartForConditionalGeneration
 
-if IS_CT2:
-    try:
-        translator = ctranslate2.Translator(MODEL_PATH)
-    except Exception as e:
-        print(f"Failed to load CT2 model: {e}")
-        IS_CT2 = False
-        from transformers import MT5ForConditionalGeneration
-        MODEL_PATH = "models/mt5-transliteration" 
-        if not os.path.exists(MODEL_PATH):
-             MODEL_PATH = "google/mt5-small"
-        print(f"Fallback to HF model: {MODEL_PATH}")
-        model = MT5ForConditionalGeneration.from_pretrained(MODEL_PATH)
-else:
-    model = MT5ForConditionalGeneration.from_pretrained(MODEL_PATH)
+print(f"Loading model from {model_to_load} (CT2={IS_CT2})...")
 
-PREFIX_MAP = {
-    "Hindi": "transliterate to hindi: ",
-    "Tamil": "transliterate to tamil: ",
-    "Bengali": "transliterate to bengali: "
+try:
+    if IS_CT2:
+        tokenizer = MBart50TokenizerFast.from_pretrained(model_to_load)
+        translator = ctranslate2.Translator(model_to_load)
+    else:
+        tokenizer = MBart50TokenizerFast.from_pretrained(model_to_load)
+        model = MBartForConditionalGeneration.from_pretrained(model_to_load)
+except Exception as e:
+    print(f"Error loading model: {e}")
+    print("Falling back to base Hugging Face model...")
+    IS_CT2 = False
+    from transformers import MBartForConditionalGeneration
+    model_to_load = BASE_MODEL
+    tokenizer = MBart50TokenizerFast.from_pretrained(model_to_load)
+    model = MBartForConditionalGeneration.from_pretrained(model_to_load)
+
+# Language Code Mapping
+LANG_MAP = {
+    "Hindi": "hi_IN",
+    "Tamil": "ta_IN",
+    "Bengali": "bn_IN"
 }
 
 def transliterate(text, target_lang_name):
-    prefix = PREFIX_MAP[target_lang_name]
-    input_text = prefix + text
+    target_lang_code = LANG_MAP[target_lang_name]
     
     # Tokenize
     if IS_CT2:
-        source = tokenizer.convert_ids_to_tokens(tokenizer.encode(input_text))
+        tokenizer.src_lang = "en_XX"
+        source = tokenizer.convert_ids_to_tokens(tokenizer.encode(text))
+        
+        target_prefix = [[target_lang_code]]
         results = translator.translate_batch(
             [source],
+            target_prefix=target_prefix
         )
         target_tokens = results[0].hypotheses[0]
         return tokenizer.decode(tokenizer.convert_tokens_to_ids(target_tokens), skip_special_tokens=True)
     else:
-        inputs = tokenizer(input_text, return_tensors="pt")
-        generated = model.generate(**inputs, max_length=128)
-        return tokenizer.batch_decode(generated, skip_special_tokens=True)[0]
+        tokenizer.src_lang = "en_XX"
+        encoded = tokenizer(text, return_tensors="pt")
+        generated_tokens = model.generate(
+            **encoded,
+            forced_bos_token_id=tokenizer.lang_code_to_id[target_lang_code],
+            max_length=128
+        )
+        return tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
 
 demo = gr.Interface(
     fn=transliterate,
@@ -60,8 +76,8 @@ demo = gr.Interface(
         gr.Dropdown(choices=["Hindi", "Tamil", "Bengali"], label="Target Language", value="Hindi")
     ],
     outputs="text",
-    title="Multilingual Transliteration (mT5 + CTranslate2)",
-    description="Transliterate English text to Hindi, Tamil, or Bengali."
+    title="Multilingual Transliteration (mBART)",
+    description="Transliterate English text to Hindi, Tamil, or Bengali using mBART."
 )
 
 if __name__ == "__main__":

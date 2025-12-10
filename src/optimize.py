@@ -1,12 +1,12 @@
 import os
 import shutil
 import ctranslate2
-from transformers import MT5TokenizerFast, MT5ForConditionalGeneration
+from transformers import MBart50TokenizerFast, MBartForConditionalGeneration
 
 # Configuration
-BASE_MODEL = "google/mt5-small"
-MODEL_DIR = "models/mt5-transliteration"
-OUTPUT_DIR = "models/mt5-ct2"
+BASE_MODEL = "models/base_mbart" if os.path.exists("models/base_mbart") else "facebook/mbart-large-50-many-to-many-mmt"
+MODEL_DIR = "models/mbart-transliteration"
+OUTPUT_DIR = "models/mbart-ct2"
 
 def optimize_model():
     print(f"Optimizing model from {MODEL_DIR} to {OUTPUT_DIR}...")
@@ -15,24 +15,43 @@ def optimize_model():
     if os.path.exists(OUTPUT_DIR):
         shutil.rmtree(OUTPUT_DIR)
         
-    # Convert using ctranslate2 command line tool equivalent
-    # ctranslate2.converters.TransformersConverter(
-    #     model_name_or_path, activation_scales=None, copy_files=None, load_as_float16=False, 
-    #     low_cpu_mem_usage=False, trust_remote_code=False
-    # ).convert(output_dir, vmap=None, quantization=None, force=False)
-    
     # If local model doesn't exist (training failed) or is invalid, use base model
     model_path = MODEL_DIR
     # Check if directory exists AND contains config.json
     is_valid = os.path.exists(MODEL_DIR) and os.path.exists(os.path.join(MODEL_DIR, "config.json"))
     
     if not is_valid:
-        print(f"Local model {MODEL_DIR} not found or invalid. Downloading base model {BASE_MODEL}...")
-        model_path = "models/base_mbart"
-        tokenizer = MT5TokenizerFast.from_pretrained(BASE_MODEL)
-        model = MT5ForConditionalGeneration.from_pretrained(BASE_MODEL)
-        tokenizer.save_pretrained(model_path)
-        model.save_pretrained(model_path)
+        print(f"Local trained model {MODEL_DIR} not found or invalid. Falling back to base model...")
+        
+        # Determine base model path
+        base_model_candidate = "models/base_mbart"
+        use_hub = True
+        
+        if os.path.exists(base_model_candidate):
+            # Check if it's loadable
+            try:
+                temp_tokenizer = MBart50TokenizerFast.from_pretrained(base_model_candidate)
+                # If successful, use it
+                base_model_path = base_model_candidate
+                use_hub = False
+            except Exception:
+                print(f"Local base model {base_model_candidate} is corrupted. using Hub model.")
+                
+        if use_hub:
+           base_model_path = "facebook/mbart-large-50-many-to-many-mmt"
+
+        print(f"Using base model from: {base_model_path}")
+        model_path = "models/base_mbart_local_copy"
+        
+        # Download/Save to local path for CTranslate2 to consume
+        try:
+            tokenizer = MBart50TokenizerFast.from_pretrained(base_model_path)
+            model = MBartForConditionalGeneration.from_pretrained(base_model_path)
+            tokenizer.save_pretrained(model_path)
+            model.save_pretrained(model_path)
+        except Exception as e:
+            print(f"Failed to prepare base model: {e}")
+            return
         
     converter = ctranslate2.converters.TransformersConverter(
         model_name_or_path=model_path,
@@ -46,7 +65,7 @@ def optimize_model():
     )
     
     # Copy tokenizer files
-    tokenizer = MT5TokenizerFast.from_pretrained(model_path)
+    tokenizer = MBart50TokenizerFast.from_pretrained(model_path)
     tokenizer.save_pretrained(OUTPUT_DIR)
     
     print(f"Optimization complete. Model saved to {OUTPUT_DIR}")
